@@ -1,0 +1,53 @@
+# Employee onboarding.
+# Flow: document_checks -> background_check (external) -> background_rules
+name: employee_onboarding
+version: 1
+description: New employee onboarding clearance
+
+input_schema:
+  candidate_id:  {type: string, min_length: 3}
+  full_name:     {type: string, min_length: 2}
+  department:    {type: string, enum: [engineering, finance, operations, sales, hr]}
+  offer_signed:  {type: boolean}
+  documents:     {type: object, required: false}
+
+start_stage: document_checks
+
+stages:
+  document_checks:
+    type: rules
+    description: Paperwork must be complete
+    rules:
+      - id: ONB-001
+        description: Offer letter must be signed
+        condition: {field: offer_signed, op: eq, value: true}
+        on_fail: REJECTED
+      - id: ONB-002
+        description: Identity proof and education certificate must be submitted
+        condition:
+          all:
+            - {field: documents.id_proof, op: exists}
+            - {field: documents.education_certificate, op: exists}
+        on_fail: MANUAL_REVIEW
+    on_pass: background_check
+
+  background_check:
+    type: dependency
+    description: Third-party background verification
+    dependency: background_check
+    input: {candidate_id: candidate_id}
+    output_key: background
+    retry: {max_attempts: 4, base_delay: 0.2}
+    timeout_seconds: 2.0       # each attempt gets at most 2 s
+    on_success: background_rules
+    on_failure: RETRY_PENDING
+
+  background_rules:
+    type: rules
+    description: Background verification result
+    rules:
+      - id: BGV-001
+        description: Background check status must be clear
+        condition: {field: background.status, op: eq, value: clear}
+        on_fail: MANUAL_REVIEW
+    on_pass: APPROVED

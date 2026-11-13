@@ -1,0 +1,68 @@
+# Insurance claim processing.
+# Flow: policy_checks -> fraud_check (external) -> fraud_rules -> payout_routing
+name: claim_processing
+version: 1
+description: Insurance claim processing
+
+input_schema:
+  claim_id:        {type: string, min_length: 3}
+  policy_id:       {type: string, pattern: "^POL-[0-9]{4,}$"}
+  claim_type:      {type: string, enum: [health, motor, property]}
+  policy_active:   {type: boolean}
+  claim_amount:    {type: number, min: 1}
+  policy_coverage: {type: number, min: 0}
+  documents:       {type: object, required: false}
+
+start_stage: policy_checks
+
+stages:
+  policy_checks:
+    type: rules
+    description: Mandatory policy checks
+    rules:
+      - id: POL-001
+        description: Policy must be active
+        condition: {field: policy_active, op: eq, value: true}
+        on_fail: REJECTED
+      - id: POL-002
+        description: Claim amount must be within policy coverage
+        condition: {field: claim_amount, op: lte, value_field: policy_coverage}
+        on_fail: REJECTED
+      - id: POL-003
+        description: Signed claim form must be attached
+        condition: {field: documents.claim_form, op: exists}
+        on_fail: MANUAL_REVIEW
+    on_pass: fraud_check
+
+  fraud_check:
+    type: dependency
+    description: Score the claim with the fraud detection service
+    dependency: fraud_detection
+    input: {claim_id: claim_id, policy_id: policy_id}
+    output_key: fraud
+    retry: {max_attempts: 3, base_delay: 0.2}
+    timeout_seconds: 2.0       # each attempt gets at most 2 s
+    on_success: fraud_rules
+    on_failure: RETRY_PENDING
+
+  fraud_rules:
+    type: rules
+    description: Fraud thresholds
+    rules:
+      - id: FRD-001
+        description: Fraud risk score must be below 90
+        condition: {field: fraud.risk_score, op: lt, value: 90}
+        on_fail: REJECTED
+      - id: FRD-002
+        description: Fraud risk score above 60 needs an investigator
+        condition: {field: fraud.risk_score, op: lte, value: 60}
+        on_fail: MANUAL_REVIEW
+    on_pass: payout_routing
+
+  payout_routing:
+    type: branch
+    description: Small claims are paid automatically
+    branches:
+      - when: {field: claim_amount, op: lte, value: 50000}
+        next: APPROVED
+    default: MANUAL_REVIEW

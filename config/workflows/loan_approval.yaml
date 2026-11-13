@@ -1,0 +1,88 @@
+# Personal loan approval.
+# Flow: eligibility -> credit_check (external) -> risk_assessment -> amount_routing
+#       -> standard_checks (only for the middle segment) -> decision
+name: loan_approval
+version: 1
+description: Personal loan application approval
+
+input_schema:
+  applicant_id:    {type: string, min_length: 3, description: Unique applicant reference}
+  applicant_name:  {type: string, min_length: 2}
+  age:             {type: integer, min: 0, max: 120}
+  monthly_income:  {type: number, min: 0}
+  loan_amount:     {type: number, min: 1000, max: 5000000}
+  employment_type: {type: string, enum: [salaried, self_employed, unemployed]}
+  documents:       {type: object, required: false, description: Map of document name to reference}
+
+start_stage: eligibility
+
+stages:
+  eligibility:
+    type: rules
+    description: Mandatory eligibility checks
+    rules:
+      - id: ELIG-001
+        description: Applicant must be at least 21 years old
+        condition: {field: age, op: gte, value: 21}
+        on_fail: REJECTED
+      - id: ELIG-002
+        description: Applicant must have an income source
+        condition: {field: employment_type, op: in, value: [salaried, self_employed]}
+        on_fail: REJECTED
+      - id: ELIG-003
+        description: KYC identity proof must be submitted
+        condition: {field: documents.id_proof, op: exists}
+        on_fail: MANUAL_REVIEW
+    on_pass: credit_check
+
+  credit_check:
+    type: dependency
+    description: Fetch credit report from the credit bureau
+    dependency: credit_bureau
+    input: {applicant_id: applicant_id}
+    output_key: credit
+    retry: {max_attempts: 3, base_delay: 0.2, max_delay: 1.0}
+    timeout_seconds: 2.0       # each attempt gets at most 2 s
+    on_success: risk_assessment
+    on_failure: RETRY_PENDING
+
+  risk_assessment:
+    type: rules
+    description: Threshold checks on credit and affordability
+    rules:
+      - id: RISK-001
+        description: Credit score must be at least 600
+        condition: {field: credit.score, op: gte, value: 600}
+        on_fail: REJECTED
+      - id: RISK-002
+        description: Loan amount must not exceed 20x monthly income
+        condition: {field: loan_amount, op: lte, value_field: monthly_income, factor: 20}
+        on_fail: MANUAL_REVIEW
+    on_pass: amount_routing
+
+  amount_routing:
+    type: branch
+    description: Route by loan size and credit quality
+    branches:
+      - when:
+          all:
+            - {field: loan_amount, op: lte, value: 500000}
+            - {field: credit.score, op: gte, value: 750}
+        next: APPROVED            # fast track
+      - when: {field: loan_amount, op: gt, value: 1000000}
+        next: MANUAL_REVIEW       # large loans always need a human
+    default: standard_checks
+
+  standard_checks:
+    type: rules
+    description: Extra checks for the middle segment
+    rules:
+      - id: STD-001
+        description: Applicant must have fewer than 3 active loans
+        condition: {field: credit.active_loans, op: lt, value: 3}
+        on_fail: MANUAL_REVIEW
+      - id: STD-002
+        description: Applicant should have no recent defaults
+        condition: {field: credit.recent_defaults, op: eq, value: 0}
+        on_fail: FLAG
+    on_pass: APPROVED

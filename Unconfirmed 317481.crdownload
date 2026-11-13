@@ -1,0 +1,7 @@
+[pytest]
+testpaths = tests
+addopts = -q
+filterwarnings =
+    # third-party notice from FastAPI's test client, not about our code
+    ignore::DeprecationWarning:fastapi.testclient
+    ignore:.*httpx.*starlette.testclient.*:DeprecationWarning
